@@ -1,0 +1,102 @@
+{
+  "phase": 1,
+  "runtime": {
+    "node": "v24.22.3",
+    "v8": "13.6.233.17-node.63",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "scope": "Node + Sheets simulado; lectura, SHA-256, JSON, validación completa y replay. Sin latencia de Google ni vistas.",
+  "methodology": "Un fixture de 4.000 operaciones; prefijos de 1.000/2.000/4.000. Una lectura completa y tres con snapshot (mediana), sin warmup explícito.",
+  "target": {
+    "maxReplayed": 200,
+    "maxMilliseconds": 300,
+    "requiredAfterPhase": 3
+  },
+  "results": [
+    {
+      "operations": 1000,
+      "completedOrders": 166,
+      "remainingOrderOperations": 4,
+      "snapshotRevision": 800,
+      "fullReplay": {
+        "milliseconds": 1081.7,
+        "operations": 1000
+      },
+      "snapshot": {
+        "medianMilliseconds": 386.42,
+        "samplesMilliseconds": [
+          386.42,
+          402.28,
+          381.61
+        ],
+        "replayed": 200,
+        "deepEqual": true
+      },
+      "archived": {
+        "milliseconds": 368.36,
+        "replayed": 200,
+        "deepEqual": true,
+        "copied": 800,
+        "maintenanceMilliseconds": 26.45
+      },
+      "targetMillisecondsMet": false
+    },
+    {
+      "operations": 2000,
+      "completedOrders": 333,
+      "remainingOrderOperations": 2,
+      "snapshotRevision": 1800,
+      "fullReplay": {
+        "milliseconds": 4136.57,
+        "operations": 2000
+      },
+      "snapshot": {
+        "medianMilliseconds": 781.81,
+        "samplesMilliseconds": [
+          789.54,
+          781.81,
+          775.57
+        ],
+        "replayed": 200,
+        "deepEqual": true
+      },
+      "archived": {
+        "milliseconds": 790.69,
+        "replayed": 200,
+        "deepEqual": true,
+        "copied": 1800,
+        "maintenanceMilliseconds": 14.06
+      },
+      "targetMillisecondsMet": false
+    },
+    {
+      "operations": 4000,
+      "completedOrders": 666,
+      "remainingOrderOperations": 4,
+      "snapshotRevision": 3800,
+      "fullReplay": {
+        "milliseconds": 16272.92,
+        "operations": 4000
+      },
+      "snapshot": {
+        "medianMilliseconds": 1646.56,
+        "samplesMilliseconds": [
+          1636.53,
+          1698.83,
+          1646.56
+        ],
+        "replayed": 200,
+        "deepEqual": true
+      },
+      "archived": {
+        "milliseconds": 1660.78,
+        "replayed": 200,
+        "deepEqual": true,
+        "copied": 3800,
+        "maintenanceMilliseconds": 39.62
+      },
+      "targetMillisecondsMet": false
+    }
+  ]
+}
