@@ -1,6 +1,6 @@
 # Gestión para emprendimientos
 
-Producto demostrativo **0.4**, preparado por Martín de los Santos para conversar y trabajar con Fabián. Entrega del 22/11/2026, America/Montevideo. Nombre de trabajo; marca y condiciones comerciales pendientes.
+Producto demostrativo **0.4**, preparado por Martín de los Santos. Entrega del 22/11/2026, America/Montevideo. Nombre de trabajo; marca y condiciones comerciales pendientes.
 
 > Saber qué hay, qué pidió cada cliente, qué falta preparar, quién retiró y qué falta entregar o cobrar.
 
