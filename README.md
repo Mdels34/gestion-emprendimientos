@@ -1,23 +1,44 @@
 # Gestión para emprendimientos
 
-Producto demostrativo **0.4**, preparado por Martín de los Santos. Entrega del 22/11/2026, America/Montevideo. Nombre de trabajo; marca y condiciones comerciales pendientes.
+Demo 0.4 con **Fase 1 de persistencia** preparada el 23/11/2026, America/Montevideo. Nombre de trabajo; marca y condiciones comerciales pendientes.
 
 > Saber qué hay, qué pidió cada cliente, qué falta preparar, quién retiró y qué falta entregar o cobrar.
 
-## Repositorio del producto
+Repositorio público: [Mdels34/gestion-emprendimientos](https://github.com/Mdels34/gestion-emprendimientos). La invitación de un colaborador se gestiona por separado.
 
-Repositorio privado: https://github.com/Mdels34/gestion-emprendimientos
+## Esta entrega: solo Fase 1
 
-- [Abrir la presentación PDF](docs/Gestion_Emprendimientos_Presentacion_Fabian.pdf).
-- [Descargar el paquete completo de la demo 0.4](Gestion_Emprendimientos_Producto_Completo_v0.4.zip), incluido el tutorial.
-- El código y las guías están organizados en este repositorio. El acceso de Fabián requiere identificar su cuenta y agregarlo como colaborador.
+- Snapshots del estado cada 200 operaciones confirmadas, con troceado, dos espacios alternados y comprobación SHA-256.
+- Lectura desde el último snapshot y cola secuencial. Conserva Base antigua, revisión e idempotencia por requestId.
+- Archivo seguro por copia y verificación, **manual por defecto y con respaldo previo**. El automatismo requiere activación explícita.
+- Se elimina el tope fijo de 1.000; `GESTION_MAX_OPERACIONES` permite configurar otro. No implica capacidad ilimitada.
+- Reglas e interfaz sin cambios. No se avanzó a las fases 2 a 7.
 
-## Empezar
+Leé [la entrega técnica y sus mediciones](docs/FASE_1.md), [la arquitectura](docs/ARQUITECTURA.md), [el alcance](docs/ALCANCE.md) y [la actualización con respaldo y checklist de Sheets](LEEME.md) antes de instalar.
 
-1. Leer `docs/Gestion_Emprendimientos_Presentacion_Fabian.pdf`: presentación de 12 páginas con funciones, ejemplos y estado del producto.
-2. Abrir `demo.html` en un navegador moderno. Los datos son ficticios y las pruebas quedan en ese navegador.
-3. Usar `docs/PRESENTACION.md` como guion para recorrer el producto.
-4. Revisar `LEEME.md` para preparar una instalación independiente en Google Sheets.
+**Validación:** 170 comprobaciones locales aprobadas: 115 anteriores + 55 nuevas. Backend simulado; esta persistencia no se probó en Sheets real y no se cambió el despliegue existente. La prueba remota histórica del 20/11/2026 corresponde a la demo anterior.
+
+Con 4.000 operaciones ficticias, el benchmark reprodujo 200 y devolvió un estado profundamente idéntico al replay completo: 1.646,56 ms frente a 16.272,92 ms en esta ejecución local. **Todavía no cumple 300 ms**; esa aceptación corresponde al cierre de las fases 1 a 3.
+
+## Empezar y construir
+
+Requisitos: Node.js y Python 3; sin dependencias npm para ejecutar QA o construir la app.
+
+```bash
+node qa/checks.js
+node qa/benchmark.js --output qa/benchmark-fase1.json
+python3 build.py
+```
+
+`build.py` genera `demo.html`, `entrega/Google_Apps_Script/` y paquetes en `entrega/`. Para sincronizar la copia generada de la raíz, sin editarla a mano:
+
+```bash
+python3 -c "import shutil; shutil.copytree('entrega/Google_Apps_Script', 'Google_Apps_Script', dirs_exist_ok=True)"
+```
+
+Abrí `demo.html` para recorrer la app local con datos ficticios. Para una instalación de Google, seguí [LEEME.md](LEEME.md). No repitas instaladores al actualizar una app ya configurada.
+
+## Funciones conservadas
 
 | Módulo | Qué resuelve |
 |---|---|
@@ -28,51 +49,28 @@ Repositorio privado: https://github.com/Mdels34/gestion-emprendimientos
 | Repartos | Transporte, conductor, documento, despacho, entrega, incidencia y retorno. |
 | Reportes | Entregas, cobros, inventario, descarga CSV y copia JSON. |
 
-## Contenido del proyecto
+Documento y matrícula se mantienen como texto; cada despacho conserva su copia de transporte. Moneda UYU; zona America/Montevideo. Sin cambios en fecha de referencia ni tratamiento de devoluciones con cobros.
 
-- `model.js`: reglas compartidas de negocio.
-- `app.js` y `ui.html`: interfaz adaptable.
-- `backend.gs`: control de acceso y persistencia en Sheets.
-- `Google_Apps_Script/`: archivos instalables generados.
-- `plantilla/Gestion_Emprendimientos_Plantilla.xlsx`: estructura vacía exportada; debe convertirse a Google Sheets para la instalación.
-- `qa/checks.js`: 115 comprobaciones de reglas y backend con Sheets simulado.
-- `docs/`: presentación, alcance, arquitectura, estado y guías.
-- `assets/capturas/`: imágenes del tutorial con registros ficticios.
-- `tools/generar_presentacion.py`: fuente reproducible del PDF; requiere reportlab, Pillow y DejaVu Sans.
+## Archivos
 
-El paquete completo incluye además el tutorial en vídeo, subtítulos y el repositorio Git transportable. El vídeo no es necesario para ejecutar la aplicación.
+- `model.js`: reglas puras compartidas; `app.js`, `ui.html`: interfaz.
+- `backend.gs`: persistencia, acceso, snapshots y archivo.
+- `Google_Apps_Script/`: archivos instalables generados; no editar manualmente.
+- `qa/checks.js`, `qa/sheets-mock.js`, `qa/fixtures.js`: comprobaciones y simulador.
+- `qa/benchmark.js`, `qa/benchmark-fase1.json`: medición reproducible y resultado local.
+- `plantilla/Gestion_Emprendimientos_Plantilla.xlsx`: plantilla para convertir a Sheets.
+- `docs/`: arquitectura, alcance, guía y entrega de Fase 1.
 
-## Construcción y validación
+## Presentación histórica 0.4
 
-Requisitos para el código: Python 3 y Node.js. El HTML generado no requiere instalar dependencias ni usar una API de pago.
+[Presentación PDF](docs/Gestion_Emprendimientos_Presentacion_Fabian.pdf) y [paquete completo 0.4](Gestion_Emprendimientos_Producto_Completo_v0.4.zip) se conservan como material histórico de funciones e interfaz. **No incluyen los cambios de persistencia de esta fase.** Instalá desde el código generado actual. La presentación puede reproducirse con `tools/generar_presentacion.py`; requiere reportlab, Pillow y DejaVu Sans.
 
-```bash
-node qa/checks.js
-python3 build.py
-```
+El ZIP grande y su historial Git quedan sin cambios hasta la Fase 7. Los enlaces precargados del HTML apuntan a una instalación privada anterior; una nueva instalación usa su propio `/exec` y permisos.
 
-El segundo comando genera `demo.html`, los archivos de Apps Script y un paquete de instalación en `entrega/`.
+## Estado del piloto
 
-Para regenerar la presentación en un entorno con sus dependencias:
+No hay demanda ni ventas validadas. No incluye GPS, rutas optimizadas, roles de repartidor, entregas parciales, devoluciones posteriores a una entrega, reintegros, pagos en línea ni facturación fiscal. Exportar JSON no implementa restauración ni copias automáticas. Las cuotas de Google requieren medición real.
 
-```bash
-python3 tools/generar_presentacion.py
-```
+Una instalación por negocio. El HTML local no sincroniza dispositivos. No se modifica ningún sistema externo al producto ni se conceden accesos como parte de esta entrega. Titularidad y licencia se acuerdan antes de distribuir o comercializar.
 
-## Dos modos
-
-**Local:** el archivo HTML guarda en el navegador; no sincroniza otros dispositivos.
-
-**Google:** la misma interfaz utiliza Apps Script para validar y escribir las operaciones en una planilla. Requiere cuenta Google autorizada y despliegue propio por negocio. Los enlaces precargados en la demo corresponden a la instalación privada de prueba del propietario y no conceden acceso. Una nueva instalación utiliza su propio enlace `/exec`.
-
-La instalación privada se probó el 20/11/2026 con lectura, escritura y recarga, y se retiraron los registros de esa prueba. Esta entrega no realiza una nueva prueba remota, no cambia el despliegue y no concede acceso a Fabián.
-
-## Estado y límites
-
-Base funcional para un primer piloto. No hay demanda ni ventas validadas. No incluye GPS, rutas optimizadas, roles independientes de repartidor, entregas parciales, devoluciones posteriores a una entrega, reintegros, pagos en línea, facturación fiscal ni integraciones automáticas.
-
-El paquete limita el registro a 1.000 operaciones. Antes de ampliar el uso deben validarse rendimiento, permisos, concurrencia, copias y recuperación. Descargar JSON no acredita por sí solo una restauración completa.
-
-El proyecto se mantiene separado de los sistemas productivos de Estawol y de la memoria personal. No se concede una licencia de distribución pública ni se define aquí la titularidad entre colaboradores; esos puntos se acuerdan antes de comercializar.
-
-Siguiente paso: elegir un negocio piloto y acordar con Fabián alcance, responsabilidades, soporte y modelo de cobro.
+La Fase 2 queda pendiente de aprobación expresa.

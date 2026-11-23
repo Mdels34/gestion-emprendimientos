@@ -94,24 +94,10 @@ check(()=>assert.equal(s.products.at(-1).stock,10));
 check(()=>assert.equal(M.validate(s),true));
 
 // Ejecución de Apps Script con planilla simulada: autenticación, concurrencia e idempotencia.
-class Sheet{
- constructor(name,book){this.name=name;this.book=book;this.rows=[];}
- setName(name){delete this.book.sheets[this.name];this.name=name;this.book.sheets[name]=this;return this;}
- getLastRow(){return this.rows.length;}
- clearContents(){this.rows=[];return this;}
- appendRow(row){this.rows.push(row.slice());return this;}
- setFrozenRows(){return this;}autoResizeColumns(){return this;}
- getRange(row,col,numRows=1,numCols=1){const self=this;return {
-  setValues(values){values.forEach((r,i)=>r.forEach((v,j)=>{self.rows[row-1+i]||=[];self.rows[row-1+i][col-1+j]=v;}));return this;},
-  getValue(){return self.rows[row-1]?.[col-1]||'';},
-  getValues(){return Array.from({length:numRows},(_,i)=>Array.from({length:numCols},(_,j)=>self.rows[row-1+i]?.[col-1+j]??''));},
-  setBackground(){return this;},setFontColor(){return this;},setFontWeight(){return this;}
- };}
-}
-class Book{constructor(id='fake-book-id'){this.id=id;this.sheets={Hoja1:new Sheet('Hoja1',this)};}getSheets(){return Object.values(this.sheets);}getSheetByName(n){return this.sheets[n];}insertSheet(n){if(this.sheets[n])throw Error('Duplicada');return this.sheets[n]=new Sheet(n,this);}getId(){return this.id;}getName(){return 'Planilla ficticia '+this.id;}getUrl(){return 'https://docs.google.com/spreadsheets/d/'+this.id;}}
+const {Sheet,Book,utilities,createHarness}=require('./sheets-mock.js');
 let book=new Book(),props={},email='demo@example.test',lockHeld=false;
 const books={};books[book.id]=book;
-const context={InventoryDemoModel:M,console:{log(){},error(){}},Session:{getEffectiveUser:()=>({getEmail:()=>email}),getActiveUser:()=>({getEmail:()=>email})},PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k],setProperties:o=>Object.assign(props,o)})},SpreadsheetApp:{getActiveSpreadsheet:()=>book,openById:id=>{if(!books[id])throw Error('Sin acceso a esa hoja');return books[id];},create:()=>{const b=new Book('generated-book-id');books[b.id]=b;return b;},flush(){}},LockService:{getScriptLock:()=>({waitLock(){assert.equal(lockHeld,false);lockHeld=true;},releaseLock(){lockHeld=false;}})}};
+const context={InventoryDemoModel:M,Utilities:utilities,console:{log(){},error(){}},Session:{getEffectiveUser:()=>({getEmail:()=>email}),getActiveUser:()=>({getEmail:()=>email})},PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k],setProperties:o=>Object.assign(props,o)})},SpreadsheetApp:{getActiveSpreadsheet:()=>book,openById:id=>{if(!books[id])throw Error('Sin acceso a esa hoja');return books[id];},create:()=>{const b=new Book('generated-book-id');books[b.id]=b;return b;},flush(){}},LockService:{getScriptLock:()=>({waitLock(){assert.equal(lockHeld,false);lockHeld=true;},releaseLock(){lockHeld=false;}})}};
 vm.createContext(context);vm.runInContext(fs.readFileSync(__dirname+'/../backend.gs','utf8'),context);
 context.setupDemo();
 check(()=>assert.equal(book.getSheets().length,9));
@@ -211,4 +197,312 @@ templateBase.rows[1][1]=goodJson;book=null;
 check(()=>assert.throws(()=>context.setupPlantilla(),/Extensiones/));
 check(()=>assert.equal(Object.keys(props).length,0));
 book=oldBook;props=oldProps;
-console.log(JSON.stringify({passed:checks,model:'reservas, movimientos, entregas, devoluciones, cobros y alta de cliente dentro del pedido',appsScript:'simulado: identidad, bloqueo, revisión, reintentos y persistencia de operaciones'}));
+const originalChecks=checks;assert.equal(originalChecks,115);
+const {makeFixture,loadFixture}=require('./fixtures.js');
+const backendSource=fs.readFileSync(__dirname+'/../backend.gs','utf8');
+const fixture=makeFixture(1001),phase1Cases=[];
+const plain=value=>JSON.parse(JSON.stringify(value));
+function phaseCheck(name,fn){check(()=>{try{fn();}catch(error){error.message=name+': '+error.message;throw error;}});phase1Cases.push(name);}
+function scenario(revision=200){return loadFixture(createHarness(M,backendSource),fixture,revision);}
+function snapshotAt(h,revision){return h.context.checkpointIfDue_(h.book,{state:fixture.checkpoints.get(revision),checkpoint:h.context.readCheckpoint_(h.book)},true);}
+function failOnce(h,predicate,message='Falla ficticia de almacenamiento'){
+ h.env.hook=event=>{if(predicate(event)){h.env.hook=null;throw Error(message);}};
+}
+function replayAll(h){
+ const base=h.book.getSheetByName('Base');let state=JSON.parse(base.rows.slice(1).map(row=>String(row?.[1]||'')).join(''));
+ const byRevision=new Map();
+ for(const name of ['Operaciones archivo','Operaciones']){
+  for(const row of (h.book.getSheetByName(name)?.rows||[]).slice(1)){
+   if(byRevision.has(row[0]))assert.deepEqual(row,byRevision.get(row[0]));else byRevision.set(row[0],row);
+  }
+ }
+ for(const row of [...byRevision.values()].sort((a,b)=>a[0]-b[0])){assert.equal(Number(row[0]),state.revision+1);state=M.apply(state,JSON.parse(row[4]));}
+ return state;
+}
+
+phaseCheck('Base histórica de una celda y registro completo',()=>{
+ const h=scenario(400),baseBefore=JSON.stringify(h.book.getSheetByName('Base').rows);
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(400));
+ assert.equal(JSON.stringify(h.book.getSheetByName('Base').rows),baseBefore);
+ assert.equal(h.book.getSheetByName('Operaciones archivo'),undefined);
+});
+phaseCheck('Snapshot más cola equivale al registro completo',()=>{
+ const h=scenario(400);snapshotAt(h,200);h.env.replayed=0;h.env.reads=[];
+ assert.deepEqual(plain(h.context.readState_(h.book)),replayAll(h));assert.equal(h.env.replayed,200);
+ assert.equal(h.env.reads.filter(r=>r.sheet==='Operaciones'&&r.numColumns===5).reduce((n,r)=>n+r.numRows,0),200);
+});
+phaseCheck('Solo se usa el último snapshot confirmado',()=>{
+ const h=scenario(600);snapshotAt(h,200);snapshotAt(h,400);h.env.replayed=0;
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(600));assert.equal(h.env.replayed,200);
+ assert.equal(JSON.parse(h.book.getSheetByName('Base').rows[0][3]).revision,200);
+ assert.equal(JSON.parse(h.book.getSheetByName('Base').rows[0][6]).revision,400);
+});
+phaseCheck('Snapshot íntegro cuando no queda cola',()=>{
+ const h=scenario(400);snapshotAt(h,400);h.env.replayed=0;
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(400));assert.equal(h.env.replayed,0);
+});
+phaseCheck('La operación 201 crea el snapshot 200 sin alterar Base A:B',()=>{
+ const h=scenario(),original=h.book.getSheetByName('Base').rows.map(row=>row.slice(0,2));
+ const response=h.context.runAppAction(200,JSON.parse(fixture.rows[200][4]));
+ assert.equal(response.state.revision,201);assert.equal(h.context.readCheckpoint_(h.book).revision,200);
+ assert.deepEqual(h.book.getSheetByName('Base').rows.slice(0,original.length).map(row=>row.slice(0,2)),original);
+ assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),202);
+ assert.equal(h.book.getSheetByName('Operaciones archivo'),undefined);
+});
+phaseCheck('Los snapshots se trocean en 24.000 caracteres',()=>{
+ const h=scenario();snapshotAt(h,200);const base=h.book.getSheetByName('Base'),meta=JSON.parse(base.rows[0][3]);
+ assert.ok(meta.chunks>1);assert.ok(base.rows.slice(1,meta.chunks+1).every(row=>row[4].length<=24000));
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(200));
+});
+phaseCheck('El troceado conserva pares sustitutos Unicode',()=>{
+ const h=scenario(0),value='x'.repeat(23999)+'😀'+'y'.repeat(24001),chunks=h.context.stateChunks_(value,'PRUEBA');
+ assert.equal(chunks.map(row=>row[1]).join(''),value);assert.ok(chunks.every(row=>row[1].length<=24000));
+ assert.ok(chunks.every(row=>!/[\uD800-\uDBFF]$/.test(row[1])));
+});
+phaseCheck('Se amplía una Base pequeña sin borrar columnas existentes',()=>{
+ const h=scenario(),base=h.book.getSheetByName('Base');base.maxRows=2;base.maxColumns=2;
+ snapshotAt(h,200);assert.ok(base.getMaxRows()>=3);assert.ok(base.getMaxColumns()>=8);
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(200));
+});
+phaseCheck('No se sobrescribe contenido ajeno en los slots de Base',()=>{
+ const h=scenario(),base=h.book.getSheetByName('Base');base.getRange(3,7).setValue('Dato ficticio ajeno');
+ const previous=JSON.stringify(base.rows);
+ assert.throws(()=>snapshotAt(h,200),/ocupado|información|snapshot/i);
+ assert.equal(JSON.stringify(base.rows),previous);
+});
+
+for(const [name,predicate] of [
+ ['antes de escribir fragmentos',e=>e.method==='setValues'&&e.sheet==='Base'&&e.row===2&&e.column===4&&e.phase==='before'],
+ ['después de escribir fragmentos',e=>e.method==='setValues'&&e.sheet==='Base'&&e.row===2&&e.column===4&&e.phase==='after'],
+ ['antes de confirmar manifiesto',e=>e.method==='setValues'&&e.sheet==='Base'&&e.row===1&&e.column===4&&e.numColumns===1&&e.phase==='before']
+])phaseCheck('Primer snapshot interrumpido '+name,()=>{
+ const h=scenario();failOnce(h,predicate);assert.throws(()=>snapshotAt(h,200),/Falla ficticia/);
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(200));
+ snapshotAt(h,200);assert.equal(h.context.readCheckpoint_(h.book).revision,200);
+});
+phaseCheck('Fallo tras confirmar el manifiesto no invalida el snapshot',()=>{
+ const h=scenario();failOnce(h,e=>e.method==='setValues'&&e.sheet==='Base'&&e.row===1&&e.column===4&&e.numColumns===1&&e.phase==='after');
+ assert.throws(()=>snapshotAt(h,200),/Falla ficticia/);
+ assert.equal(h.context.readCheckpoint_(h.book).revision,200);assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(200));
+});
+phaseCheck('Un slot interrumpido conserva el snapshot previo',()=>{
+ const h=scenario(600);snapshotAt(h,200);snapshotAt(h,400);
+ failOnce(h,e=>e.method==='setValues'&&e.sheet==='Base'&&e.row===2&&e.column===4&&e.phase==='before');
+ assert.throws(()=>snapshotAt(h,600),/Falla ficticia/);
+ assert.equal(h.context.readCheckpoint_(h.book).revision,400);assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(600));
+});
+phaseCheck('Fallo entre snapshot y append deja pendiente el requestId',()=>{
+ const h=scenario(),pending=JSON.parse(fixture.rows[200][4]);
+ failOnce(h,e=>e.method==='appendRow'&&e.sheet==='Operaciones'&&e.phase==='before');
+ assert.throws(()=>h.context.runAppAction(200,pending),/Falla ficticia/);
+ const state=h.context.readState_(h.book);assert.equal(state.revision,200);assert.equal(state.requests.includes(pending.requestId),false);
+ assert.equal(h.context.readCheckpoint_(h.book).revision,200);assert.equal(h.env.locked,false);
+ assert.equal(h.context.runAppAction(200,pending).state.revision,201);
+ assert.equal(h.context.runAppAction(200,pending).state.revision,201);assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),202);
+});
+phaseCheck('Append confirmado con respuesta fallida se reintenta sin duplicar',()=>{
+ const h=scenario(),pending=JSON.parse(fixture.rows[200][4]);
+ failOnce(h,e=>e.method==='appendRow'&&e.sheet==='Operaciones'&&e.phase==='after');
+ assert.throws(()=>h.context.runAppAction(200,pending),/Falla ficticia/);
+ assert.equal(h.context.readState_(h.book).revision,201);assert.equal(h.context.runAppAction(200,pending).state.revision,201);
+ assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),202);
+});
+phaseCheck('Un snapshot alterado falla cerrado y conserva el registro',()=>{
+ const h=scenario();snapshotAt(h,200);const base=h.book.getSheetByName('Base');base.rows[1][4]=base.rows[1][4].slice(0,-1)+'X';
+ assert.throws(()=>h.context.readState_(h.book),/huella/);assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),201);
+});
+phaseCheck('Un manifiesto inconsistente no se omite silenciosamente',()=>{
+ const h=scenario();snapshotAt(h,200);const base=h.book.getSheetByName('Base'),meta=JSON.parse(base.rows[0][3]);meta.chunks=0;base.rows[0][3]=JSON.stringify(meta);
+ assert.throws(()=>h.context.readState_(h.book),/manifiesto/);
+});
+for(const [name,change] of [
+ ['revisión intermedia duplicada',log=>{log.rows[250][0]=249;}],
+ ['hueco en la cola',log=>{log.rows.splice(250,1);}],
+ ['solicitud repetida en la cola',log=>{log.rows[400][4]=log.rows[399][4];}]
+])phaseCheck('Secuencia: se rechaza '+name,()=>{
+ const h=scenario(400);snapshotAt(h,200);change(h.book.getSheetByName('Operaciones'));
+ assert.throws(()=>h.context.readState_(h.book),/secuencia|repite/);
+});
+phaseCheck('Se rechaza un hueco inmediatamente después del snapshot',()=>{
+ const h=scenario(400);snapshotAt(h,200);h.book.getSheetByName('Operaciones').rows.splice(1,201);
+ assert.throws(()=>h.context.readState_(h.book),/faltan operaciones/);
+});
+
+phaseCheck('Archivo explícito: copia, verifica y quita solo el prefijo cubierto',()=>{
+ const h=scenario();const result=h.context.archiveDemoOperations();
+ assert.equal(result.copied,200);assert.equal(result.removed,200);assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),1);
+ assert.equal(h.book.getSheetByName('Operaciones archivo').getLastRow(),201);
+ assert.deepEqual(plain(h.context.readState_(h.book)),replayAll(h));
+ assert.deepEqual(plain(h.context.archiveDemoOperations()),{ok:true,revision:200,copied:0,removed:0});
+});
+phaseCheck('Conserva texto del documento y la copia de transporte en archivo',()=>{
+ const h=scenario();h.context.archiveDemoOperations();const state=h.context.readState_(h.book);
+ assert.equal(state.orders[0].transport.documentNumber,'000-DEMO');
+ assert.equal(state.orders.find(o=>o.status==='Entregado').events.find(e=>e.status==='En reparto').transport.vehiclePlate,'DEMO-001');
+ assert.deepEqual(plain(state),fixture.checkpoints.get(200));
+});
+phaseCheck('Reintento de un requestId anterior al archivo conserva revisión y cobro',()=>{
+ const h=scenario();h.context.archiveDemoOperations();const before=h.context.readState_(h.book);
+ const result=h.context.runAppAction(0,JSON.parse(fixture.rows[5][4]));
+ assert.deepEqual(plain(result.state),plain(before));assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),1);
+});
+phaseCheck('Activar archivo automático no deja un registro doble',()=>{
+ const h=scenario();h.env.props.GESTION_ARCHIVAR_OPERACIONES='true';
+ const result=h.context.runAppAction(200,JSON.parse(fixture.rows[200][4]));
+ assert.equal(result.state.revision,201);assert.equal(h.book.getSheetByName('Operaciones archivo').getLastRow(),201);
+ assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),2);assert.deepEqual(plain(result.state),replayAll(h));
+});
+for(const phase of ['before','after'])phaseCheck('Fallo '+phase+' de copiar el archivo es reintentable',()=>{
+ const h=scenario();failOnce(h,e=>e.method==='setValues'&&e.sheet==='Operaciones archivo'&&e.row===2&&e.phase===phase);
+ assert.throws(()=>h.context.archiveDemoOperations(),/Falla ficticia/);
+ assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),201);
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(200));
+ h.context.archiveDemoOperations();assert.equal(h.book.getSheetByName('Operaciones archivo').getLastRow(),201);
+ assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),1);
+});
+phaseCheck('Copia parcial de archivo se completa sin duplicados',()=>{
+ const h=scenario();h.env.hook=e=>{
+  if(e.method==='setValues'&&e.sheet==='Operaciones archivo'&&e.row===2&&e.phase==='before'){
+   h.env.hook=null;h.book.getSheetByName('Operaciones archivo').rows.push(...e.values.slice(0,77).map(row=>Array.from(row)));throw Error('Copia parcial ficticia');
+  }
+ };
+ assert.throws(()=>h.context.archiveDemoOperations(),/Copia parcial/);assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),201);
+ assert.equal(h.context.archiveDemoOperations().copied,123);assert.deepEqual(plain(h.context.readState_(h.book)),replayAll(h));
+});
+for(const phase of ['before','after'])phaseCheck('Fallo '+phase+' de quitar filas conserva todas las operaciones',()=>{
+ const h=scenario();failOnce(h,e=>e.method==='deleteRows'&&e.sheet==='Operaciones'&&e.phase===phase);
+ assert.throws(()=>h.context.archiveDemoOperations(),/Falla ficticia/);
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(200));
+ h.context.archiveDemoOperations();assert.equal(h.book.getSheetByName('Operaciones archivo').getLastRow(),201);
+ assert.deepEqual(plain(h.context.readState_(h.book)),replayAll(h));
+});
+phaseCheck('Archivo verificado pero append siguiente fallido no pierde el pedido pendiente',()=>{
+ const h=scenario();h.env.props.GESTION_ARCHIVAR_OPERACIONES='true';const pending=JSON.parse(fixture.rows[200][4]);
+ failOnce(h,e=>e.method==='appendRow'&&e.sheet==='Operaciones'&&e.phase==='before');
+ assert.throws(()=>h.context.runAppAction(200,pending),/Falla ficticia/);
+ assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),1);assert.equal(h.context.readState_(h.book).revision,200);
+ assert.equal(h.context.runAppAction(200,pending).state.revision,201);assert.deepEqual(plain(h.context.readState_(h.book)),replayAll(h));
+});
+phaseCheck('No se quitan filas cuando falla la verificación de la copia',()=>{
+ const h=scenario();h.env.hook=e=>{if(e.method==='setValues'&&e.sheet==='Operaciones archivo'&&e.row===2&&e.phase==='after'){
+  h.env.hook=null;h.book.getSheetByName('Operaciones archivo').rows[1][4]='Copia ficticia alterada';
+ }};
+ assert.throws(()=>h.context.archiveDemoOperations(),/verificar/);assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),201);
+ assert.throws(()=>h.context.archiveDemoOperations(),/no coincide/);
+});
+phaseCheck('No se reemplaza una hoja de archivo ajena',()=>{
+ const h=scenario();h.book.insertSheet('Operaciones archivo').appendRow(['Contenido ajeno de prueba']);
+ assert.throws(()=>h.context.archiveDemoOperations(),/información ajena/);
+ assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),201);assert.equal(h.book.getSheetByName('Operaciones archivo').rows[0][0],'Contenido ajeno de prueba');
+});
+phaseCheck('Quitar el último snapshot con archivo confirmado no restaura Base vieja',()=>{
+ const h=scenario();h.context.archiveDemoOperations();h.book.getSheetByName('Base').rows[0][3]='';
+ assert.throws(()=>h.context.readState_(h.book),/falta un snapshot/);
+});
+phaseCheck('Un archivo posterior al único snapshot disponible falla cerrado',()=>{
+ const h=scenario(400);snapshotAt(h,200);h.context.archiveDemoOperations();h.book.getSheetByName('Base').rows[0][6]='';
+ assert.throws(()=>h.context.readState_(h.book),/supera la revisión/);
+});
+phaseCheck('Con cuadrícula de una fila el append posterior al archivo funciona',()=>{
+ const h=scenario(),log=h.book.getSheetByName('Operaciones');log.maxRows=201;h.context.archiveDemoOperations();
+ assert.equal(log.getMaxRows(),1);assert.equal(h.context.runAppAction(200,JSON.parse(fixture.rows[200][4])).state.revision,201);
+});
+phaseCheck('setupPlantilla reconoce una instalación con snapshot y archivo sin escribir',()=>{
+ const h=scenario();h.context.archiveDemoOperations();const before=JSON.stringify(h.book.getSheets().map(sh=>sh.rows));h.env.props={};
+ assert.equal(h.context.setupPlantilla().revision,200);assert.equal(JSON.stringify(h.book.getSheets().map(sh=>sh.rows)),before);
+ assert.deepEqual(plain(h.context.getAppState().state),fixture.checkpoints.get(200));
+});
+phaseCheck('connectAppSheet copia estado completo, requestIds y conserva origen archivado',()=>{
+ const h=scenario();h.context.archiveDemoOperations();const source=JSON.stringify(h.book.getSheets().map(sh=>sh.rows));
+ const target=new Book('target-empty-fixture-id');h.env.books[target.id]=target;
+ const result=h.context.connectAppSheet(target.getUrl(),h.book.id);
+ assert.equal(result.state.revision,200);assert.equal(JSON.stringify(h.book.getSheets().map(sh=>sh.rows)),source);
+ assert.deepEqual(plain(h.context.getAppState().state),fixture.checkpoints.get(200));
+ assert.equal(h.context.runAppAction(0,JSON.parse(fixture.rows[0][4])).state.revision,200);
+ assert.equal(h.context.runAppAction(200,JSON.parse(fixture.rows[200][4])).state.revision,201);
+ assert.equal(h.context.archiveDemoOperations().copied,1);assert.equal(target.getSheetByName('Operaciones archivo').rows[1][0],201);
+});
+phaseCheck('connectAppSheet lee otro destino con snapshot y archivo existente',()=>{
+ const source=scenario(0),target=scenario();target.context.archiveDemoOperations();target.book.id='existing-snapshot-target-id';source.env.books[target.book.id]=target.book;
+ const result=source.context.connectAppSheet(target.book.getUrl(),source.book.id);
+ assert.deepEqual(plain(result.state),fixture.checkpoints.get(200));
+});
+phaseCheck('connectAppSheet rechaza un snapshot dañado sin cambiar el vínculo',()=>{
+ const source=scenario(0),target=scenario();snapshotAt(target,200);target.book.id='corrupt-snapshot-target-id';source.env.books[target.book.id]=target.book;
+ target.book.getSheetByName('Base').rows[1][4]='X'+target.book.getSheetByName('Base').rows[1][4].slice(1);
+ assert.throws(()=>source.context.connectAppSheet(target.book.getUrl(),source.book.id),/huella/);
+ assert.equal(source.env.props.GESTION_DEMO_SHEET_ID,source.book.id);
+});
+phaseCheck('Dos tandas de archivo conservan la secuencia y las copias previas',()=>{
+ const h=scenario(600);snapshotAt(h,200);h.context.archiveCoveredOperations_(h.book,h.context.readCheckpoint_(h.book));
+ snapshotAt(h,400);const result=h.context.archiveCoveredOperations_(h.book,h.context.readCheckpoint_(h.book));
+ assert.equal(result.copied,200);assert.equal(result.removed,200);
+ assert.equal(h.book.getSheetByName('Operaciones archivo').rows[400][0],400);
+ assert.equal(h.book.getSheetByName('Operaciones').rows[1][0],401);assert.deepEqual(plain(h.context.readState_(h.book)),replayAll(h));
+});
+phaseCheck('Un prefijo parcialmente quitado se termina sin duplicar archivo',()=>{
+ const h=scenario();h.env.hook=e=>{
+  if(e.method==='deleteRows'&&e.sheet==='Operaciones'&&e.phase==='before'){
+   h.env.hook=null;h.book.getSheetByName('Operaciones').deleteRows(2,77);throw Error('Borrado parcial ficticio');
+  }
+ };
+ assert.throws(()=>h.context.archiveDemoOperations(),/Borrado parcial/);
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(200));
+ const result=h.context.archiveDemoOperations();assert.equal(result.copied,0);assert.equal(result.removed,123);
+ assert.deepEqual(plain(h.context.readState_(h.book)),replayAll(h));
+});
+phaseCheck('El archivo no quita un prefijo con secuencia intermedia alterada',()=>{
+ const h=scenario();snapshotAt(h,200);h.book.getSheetByName('Operaciones').rows[100][0]=99;
+ assert.throws(()=>h.context.archiveDemoOperations(),/secuencia/);assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),201);
+});
+phaseCheck('Un encabezado de snapshot perdido no se ignora',()=>{
+ const h=scenario();snapshotAt(h,200);h.book.getSheetByName('Base').rows[0][4]='';
+ assert.throws(()=>h.context.readState_(h.book),/encabezado/);
+});
+for(const at of [1,2,3])phaseCheck('Fallo de flush '+at+' durante snapshot conserva un estado completo',()=>{
+ const h=scenario();let calls=0;failOnce(h,e=>e.method==='flush'&&++calls===at);
+ assert.throws(()=>h.context.createDemoSnapshot(),/Falla ficticia/);assert.equal(h.env.locked,false);
+ assert.deepEqual(plain(h.context.readState_(h.book)),fixture.checkpoints.get(200));
+ assert.equal(h.context.createDemoSnapshot().revision,200);
+});
+phaseCheck('Mantenimiento manual exige la cuenta instaladora',()=>{
+ const h=scenario();h.env.email='operador@example.test';h.env.props.USUARIOS_AUTORIZADOS+=','+h.env.email;
+ assert.throws(()=>h.context.createDemoSnapshot(),/Solo la cuenta instaladora/);
+ assert.throws(()=>h.context.archiveDemoOperations(),/Solo la cuenta instaladora/);assert.equal(h.env.locked,false);
+});
+phaseCheck('Sin tope fijo se leen más de 1.000 operaciones antiguas',()=>{
+ const h=scenario(1001);assert.deepEqual(plain(h.context.readState_(h.book)),fixture.state);
+ snapshotAt(h,1000);h.env.replayed=0;assert.deepEqual(plain(h.context.readState_(h.book)),fixture.state);assert.equal(h.env.replayed,1);
+});
+phaseCheck('Sin tope fijo una instalación antigua puede guardar la operación 1.002',()=>{
+ const h=scenario(1001),pending=action('collect',{orderId:'PED-0167',amount:100});
+ const result=h.context.runAppAction(1001,pending);
+ assert.equal(result.state.revision,1002);assert.equal(result.state.orders[0].paid,100);
+ assert.equal(h.context.getAppState().state.revision,1002);
+ assert.equal(h.context.runAppAction(1001,pending).state.revision,1002);
+});
+phaseCheck('El tope configurable bloquea acciones nuevas pero permite reintentos',()=>{
+ const h=scenario();h.env.props.GESTION_MAX_OPERACIONES='200';
+ assert.throws(()=>h.context.runAppAction(200,JSON.parse(fixture.rows[200][4])),/límite configurado/);
+ assert.equal(h.context.runAppAction(0,JSON.parse(fixture.rows[0][4])).state.revision,200);
+ h.env.props.GESTION_MAX_OPERACIONES='0';assert.equal(h.context.runAppAction(200,JSON.parse(fixture.rows[200][4])).state.revision,201);
+});
+phaseCheck('Configuración de límite inválida se rechaza antes de guardar',()=>{
+ const h=scenario();for(const value of ['-1','2.5','no-es-numero']){
+  h.env.props.GESTION_MAX_OPERACIONES=value;assert.throws(()=>h.context.runAppAction(200,JSON.parse(fixture.rows[200][4])),/entero no negativo/);
+ }assert.equal(h.book.getSheetByName('Operaciones').getLastRow(),201);
+});
+phaseCheck('Una acción inválida no provoca mantenimiento ni archivo',()=>{
+ const h=scenario();h.env.props.GESTION_ARCHIVAR_OPERACIONES='true';
+ assert.throws(()=>h.context.runAppAction(200,action('movement',{productId:'p-prueba',kind:'Ajuste negativo',qty:99999,note:'Prueba'})),/reservadas/);
+ assert.equal(h.context.readCheckpoint_(h.book).column,null);assert.equal(h.book.getSheetByName('Operaciones archivo'),undefined);
+});
+phaseCheck('Fallo de vistas después de snapshot y archivo mantiene la operación',()=>{
+ const h=scenario();h.env.props.GESTION_ARCHIVAR_OPERACIONES='true';h.context.projectViews_=()=>{throw Error('Vista ficticia fallida');};
+ assert.equal(h.context.runAppAction(200,JSON.parse(fixture.rows[200][4])).viewsUpdated,false);
+ assert.equal(h.context.getAppState().state.revision,201);assert.deepEqual(plain(h.context.readState_(h.book)),replayAll(h));
+});
+
+console.log(JSON.stringify({passed:checks,existing:originalChecks,phase1:phase1Cases.length,
+ model:'sin cambios de reglas; reservas, transporte y cobros preservados',
+ appsScript:'simulado: snapshots, secuencia, archivo, fallos y compatibilidad; no probado en Sheets real'}));

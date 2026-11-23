@@ -18,6 +18,7 @@ with zipfile.ZipFile(out/'Gestion_Emprendimientos_Demo_Paquete.zip','w',zipfile.
  for f in sorted(out.rglob('*')):
   if f.is_file() and f.suffix!='.zip':z.write(f,f.relative_to(out))
 project_files=['README.md','CONTINUIDAD.md','AGENTS.md','.gitignore','LEEME.md','model.js','app.js','ui.html','backend.gs','build.py','demo.html','qa/checks.js','docs/PRESENTACION.md','docs/ARQUITECTURA.md','docs/PLANTILLA_DRIVE.md','docs/INSTALACION_GOOGLE.md','tools/build_template.mjs','qa/evidencia-sheets-20261120.json']
+project_files+=['qa/sheets-mock.js','qa/fixtures.js','qa/benchmark.js','qa/benchmark-fase1.json','docs/ALCANCE.md','docs/FASE_1.md']
 with zipfile.ZipFile(out/'Gestion_Emprendimientos_Proyecto_GitHub.zip','w',zipfile.ZIP_DEFLATED) as z:
  for relative in project_files:
   if (root/relative).is_file():z.write(root/relative,relative)

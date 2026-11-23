@@ -182,7 +182,7 @@ function setupPlantilla() {
   const base=ss.getSheetByName('Base'),log=ss.getSheetByName('Operaciones');
   const headers=['Revisión','Solicitud','Fecha UTC','Tipo','Operación JSON'];
   if(!base||!log||base.getRange(2,1).getValue()!=='DEMO_FICTICIA_V1'||JSON.stringify(log.getRange(1,1,1,5).getValues()[0])!==JSON.stringify(headers))throw new Error('La planilla no es una plantilla compatible. No se sobrescribió nada.');
-  const state=readState_(ss); // Validar Base y el registro completo sin escribir en las hojas.
+  const state=readState_(ss); // Validar el checkpoint y su cola, sin escribir en las hojas.
   const email=String(Session.getEffectiveUser().getEmail()||'').toLowerCase();
   if(!email)throw new Error('No se pudo identificar la cuenta Google que instala la app.');
   props.setProperties({GESTION_DEMO_SHEET_ID:ss.getId(),USUARIOS_AUTORIZADOS:email,GESTION_DEMO_OWNER_EMAIL:email});
@@ -204,16 +204,24 @@ function runAppAction(expectedRevision,action) {
   const lock=LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    const ss=getBook_(), current=readState_(ss);
+    const ss=getBook_(), loaded=readStateInfo_(ss), current=loaded.state;
     // Resolver reintentos antes de comprobar revisión evita duplicar una operación ya guardada.
     if (current.requests.includes(action.requestId)) return {state:current,storage:'sheets',connection:connectionInfo_(ss)};
     if (Number(expectedRevision)!==current.revision) throw new Error('Datos desactualizados. Se actualizará la vista; revisá y volvé a intentar.');
-    if (current.revision>=1000) throw new Error('Se alcanzó el límite de 1.000 operaciones del paquete demostrativo.');
+    const limit=operationLimit_();
+    if (limit && current.revision>=limit) throw new Error('Se alcanzó el límite configurado de '+limit+' operaciones. Revisá GESTION_MAX_OPERACIONES.');
     const received=JSON.parse(JSON.stringify(action));
     received.when=new Date().toISOString();
     const next=InventoryDemoModel.apply(current,received);
+    // El checkpoint contiene SOLO operaciones confirmadas. Si falla el append siguiente,
+    // la revisión y el requestId pendientes todavía no pertenecen al estado persistido.
+    const checkpoint=checkpointIfDue_(ss,loaded,false);
+    if(PropertiesService.getScriptProperties().getProperty('GESTION_ARCHIVAR_OPERACIONES')==='true'){
+      archiveCoveredOperations_(ss,checkpoint);
+    }
     // Una sola fila es el compromiso autoritativo. Los reportes se reconstruyen desde el registro.
-    ss.getSheetByName('Operaciones').appendRow([next.revision,received.requestId,received.when,received.type,JSON.stringify(received)]);
+    const log=ss.getSheetByName('Operaciones');ensureGrid_(log,log.getLastRow()+1,5);
+    log.appendRow([next.revision,received.requestId,received.when,received.type,JSON.stringify(received)]);
     SpreadsheetApp.flush();
     PropertiesService.getScriptProperties().setProperties({GESTION_DEMO_LAST_SAVED:received.when});
     let viewsUpdated=true;
@@ -244,9 +252,9 @@ function connectAppSheet(sheetReference,expectedCurrentId) {
     const target=SpreadsheetApp.openById(id);
     const empty=target.getSheets().every(sh=>sh.getLastRow()===0);
     if(empty){
-      const state=readState_(current),json=JSON.stringify(state),chunks=[];
-      for(let i=0;i<json.length;i+=24000)chunks.push([i===0?'DEMO_FICTICIA_V1':'CONTINUACION',json.slice(i,i+24000)]);
-      const base=target.getSheets()[0].setName('Base');base.getRange(1,1,1,2).setValues([['Tipo','Contenido JSON']]);base.getRange(2,1,chunks.length,2).setValues(chunks);
+      const state=readState_(current),chunks=stateChunks_(JSON.stringify(state),'DEMO_FICTICIA_V1');
+      const base=target.getSheets()[0].setName('Base');ensureGrid_(base,chunks.length+1,2);
+      base.getRange(1,1,1,2).setValues([['Tipo','Contenido JSON']]);base.getRange(2,1,chunks.length,2).setValues(chunks);
       target.insertSheet('Operaciones').getRange(1,1,1,5).setValues([['Revisión','Solicitud','Fecha UTC','Tipo','Operación JSON']]);
       projectViews_(target,state);SpreadsheetApp.flush();
     }else{
@@ -279,23 +287,219 @@ function getBook_() {
   return SpreadsheetApp.openById(id);
 }
 
-function readState_(ss) {
-  const base=ss.getSheetByName('Base'),log=ss.getSheetByName('Operaciones');
-  if(!base||!log)throw new Error('Faltan hojas de la demo. No se crearon datos sustitutos.');
+// A:B conserva la Base original. D:E y G:H son dos slots alternados de snapshot.
+// Cada slot se confirma escribiendo SU manifiesto al final, nunca un puntero global.
+const SNAPSHOT_INTERVAL_=200;
+const SNAPSHOT_KIND_='GESTION_SNAPSHOT_V1';
+const OPERATION_HEADERS_=['Revisión','Solicitud','Fecha UTC','Tipo','Operación JSON'];
+
+function operationLimit_() {
+  const raw=PropertiesService.getScriptProperties().getProperty('GESTION_MAX_OPERACIONES');
+  if(raw==null||String(raw).trim()==='')return 0;
+  const limit=Number(raw);
+  if(!Number.isSafeInteger(limit)||limit<0)throw new Error('Configurá GESTION_MAX_OPERACIONES como un entero no negativo; 0 deja el registro sin tope fijo.');
+  return limit;
+}
+
+function ensureGrid_(sheet,rows,columns) {
+  if(sheet.getMaxRows()<rows)sheet.insertRowsAfter(sheet.getMaxRows(),rows-sheet.getMaxRows());
+  if(sheet.getMaxColumns()<columns)sheet.insertColumnsAfter(sheet.getMaxColumns(),columns-sheet.getMaxColumns());
+}
+
+function stateChunks_(json,firstMarker) {
+  const rows=[];
+  for(let offset=0;offset<json.length;){
+    let end=Math.min(offset+24000,json.length);
+    // No separar un par UTF-16: cada celda se serializa por separado en Sheets.
+    if(end<json.length&&/[\uD800-\uDBFF]/.test(json[end-1])&&/[\uDC00-\uDFFF]/.test(json[end]))end--;
+    rows.push([offset===0?firstMarker:'CONTINUACION',json.slice(offset,end)]);offset=end;
+  }
+  return rows;
+}
+
+function snapshotHash_(json) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,json,Utilities.Charset.UTF_8)
+    .map(byte=>('0'+((byte+256)%256).toString(16)).slice(-2)).join('');
+}
+
+function snapshotSlots_(base) {
+  return [4,7].map(column=>{
+    if(base.getMaxColumns()<column+1)return {column:column,owned:false,meta:null};
+    const header=base.getRange(1,column,1,2).getValues()[0];
+    const owned=header[1]===SNAPSHOT_KIND_;
+    if(!owned){
+      if(String(header[0]).includes(SNAPSHOT_KIND_))throw new Error('El encabezado de un snapshot está dañado. Revisá la copia de seguridad antes de continuar.');
+      return {column:column,owned:false,meta:null};
+    }
+    if(header[0]==='')return {column:column,owned:true,meta:null}; // Escritura incompleta, sin confirmar.
+    let meta;try{meta=JSON.parse(String(header[0]));}catch(e){throw new Error('El manifiesto de un snapshot no es válido. No se usaron datos sustitutos.');}
+    if(meta.kind!==SNAPSHOT_KIND_||!Number.isSafeInteger(meta.revision)||meta.revision<0||
+      !Number.isSafeInteger(meta.baseRevision)||meta.baseRevision<0||meta.baseRevision>meta.revision||
+      !Number.isSafeInteger(meta.chunks)||meta.chunks<1||!/^[a-f0-9]{64}$/.test(meta.hash)){
+      throw new Error('El manifiesto de un snapshot es inconsistente. Revisá la copia de seguridad.');
+    }
+    return {column:column,owned:true,meta:meta};
+  });
+}
+
+function readSnapshotData_(base,column,meta) {
+  if(meta.chunks+1>base.getMaxRows())throw new Error('Faltan fragmentos del snapshot. No se reconstruyó un estado parcial.');
+  const rows=base.getRange(2,column,meta.chunks,2).getValues();
+  if(rows.some((row,i)=>row[0]!== (i===0?SNAPSHOT_KIND_:'CONTINUACION')||typeof row[1]!=='string'||!row[1]||row[1].length>24000)){
+    throw new Error('Los fragmentos del snapshot son inconsistentes. No se reconstruyó un estado parcial.');
+  }
+  const json=rows.map(row=>row[1]).join('');
+  if(snapshotHash_(json)!==meta.hash)throw new Error('El snapshot no coincide con su huella de integridad. Revisá la copia de seguridad.');
+  const state=JSON.parse(json);InventoryDemoModel.validate(state);
+  if(state.revision!==meta.revision||!Array.isArray(state.requests))throw new Error('La revisión del snapshot es inconsistente.');
+  return state;
+}
+
+function readCheckpoint_(ss) {
+  const base=ss.getSheetByName('Base');
+  const slots=snapshotSlots_(base),complete=slots.filter(slot=>slot.meta);
+  complete.sort((a,b)=>b.meta.revision-a.meta.revision);
+  if(complete.length){
+    const selected=complete[0];
+    if(complete.some(slot=>slot.meta.baseRevision!==selected.meta.baseRevision||
+      (slot.meta.revision===selected.meta.revision&&slot.meta.hash!==selected.meta.hash))){
+      throw new Error('Los snapshots tienen revisiones incompatibles. No se eligió un estado sustituto.');
+    }
+    const archive=ss.getSheetByName('Operaciones archivo');
+    if(archive&&archive.getLastRow()>1){
+      const archived=operationBounds_(archive);
+      if(archived.first!==selected.meta.baseRevision+1||archived.last>selected.meta.revision){
+        throw new Error('El archivo supera la revisión del snapshot o no corresponde a esta Base. Recuperá una copia consistente.');
+      }
+    }
+    return {state:readSnapshotData_(base,selected.column,selected.meta),column:selected.column,
+      revision:selected.meta.revision,baseRevision:selected.meta.baseRevision};
+  }
+  const archive=ss.getSheetByName('Operaciones archivo');
+  if(archive&&archive.getLastRow()>1)throw new Error('Hay operaciones archivadas pero falta un snapshot confirmado. Recuperá la copia de seguridad antes de continuar.');
   const raw=base.getRange(2,2,Math.max(1,base.getLastRow()-1),1).getValues().map(row=>String(row[0]||'')).join('');
   const state=JSON.parse(raw);InventoryDemoModel.validate(state);
-  let result=state;
-  const count=log.getLastRow()-1;
-  if(count>1000)throw new Error('Este paquete demostrativo admite hasta 1.000 operaciones. Revisá el diseño de persistencia antes de ampliar el uso.');
-  if(count>0){
-    log.getRange(2,1,count,5).getValues().forEach(row=>{
-      const a=JSON.parse(row[4]);
-      if(Number(row[0])!==result.revision+1)throw new Error('El registro de operaciones tiene una secuencia inconsistente.');
-      result=InventoryDemoModel.apply(result,a);
+  if(!Number.isSafeInteger(state.revision)||state.revision<0||!Array.isArray(state.requests))throw new Error('La revisión de Base es inconsistente.');
+  return {state:state,column:null,revision:state.revision,baseRevision:state.revision};
+}
+
+function operationBounds_(log) {
+  const count=Math.max(0,log.getLastRow()-1);
+  if(!count)return {count:0,first:null,last:null};
+  const first=Number(log.getRange(2,1).getValue()),last=Number(log.getRange(count+1,1).getValue());
+  if(!Number.isSafeInteger(first)||first<1||!Number.isSafeInteger(last)||last!==first+count-1){
+    throw new Error('El registro de operaciones tiene una secuencia inconsistente.');
+  }
+  return {count:count,first:first,last:last};
+}
+
+function operationFromRow_(row,revision) {
+  if(Number(row[0])!==revision)throw new Error('El registro de operaciones tiene una secuencia inconsistente.');
+  // El JSON sigue siendo autoritativo, como en las instalaciones anteriores.
+  // Las columnas auxiliares pueden tener formatos de fecha/texto del propietario.
+  return JSON.parse(row[4]);
+}
+
+function readStateInfo_(ss) {
+  const base=ss.getSheetByName('Base'),log=ss.getSheetByName('Operaciones');
+  if(!base||!log)throw new Error('Faltan hojas de la demo. No se crearon datos sustitutos.');
+  const checkpoint=readCheckpoint_(ss),bounds=operationBounds_(log);
+  let result=checkpoint.state;
+  if(bounds.count){
+    if(bounds.first>result.revision+1)throw new Error('El registro de operaciones tiene una secuencia inconsistente: faltan operaciones posteriores al snapshot.');
+    const covered=Math.min(bounds.count,Math.max(0,result.revision-bounds.first+1));
+    const remaining=bounds.count-covered;
+    if(remaining)log.getRange(covered+2,1,remaining,5).getValues().forEach(row=>{
+      const action=operationFromRow_(row,result.revision+1);
+      result=InventoryDemoModel.apply(result,action);
+      if(result.revision!==Number(row[0]))throw new Error('El registro de operaciones repite una solicitud ya confirmada.');
     });
   }
-  return result;
+  return {state:result,checkpoint:checkpoint};
 }
+
+function readState_(ss) { return readStateInfo_(ss).state; }
+
+function assertSnapshotSpace_(base,column) {
+  if(base.getMaxColumns()<column)return;
+  const width=Math.min(2,base.getMaxColumns()-column+1);
+  const header=base.getRange(1,column,1,width).getValues()[0];
+  if(header[1]===SNAPSHOT_KIND_)return;
+  const occupied=base.getRange(1,column,Math.max(1,base.getLastRow()),width).getValues().some(row=>row.some(value=>value!==''&&value!=null));
+  if(occupied)throw new Error('Base tiene información ajena en las columnas D:E o G:H. Hacé una copia de seguridad y liberá esos espacios antes de crear snapshots.');
+}
+
+function checkpointIfDue_(ss,loaded,force) {
+  const current=loaded.state,previous=loaded.checkpoint;
+  if(current.revision===previous.revision&&previous.column!==null)return previous;
+  if(!force&&current.revision-previous.revision<SNAPSHOT_INTERVAL_)return previous;
+  const base=ss.getSheetByName('Base');
+  [4,7].forEach(column=>assertSnapshotSpace_(base,column));
+  const column=previous.column===4?7:4,json=JSON.stringify(current),chunks=stateChunks_(json,SNAPSHOT_KIND_);
+  const meta={kind:SNAPSHOT_KIND_,revision:current.revision,baseRevision:previous.baseRevision,chunks:chunks.length,hash:snapshotHash_(json)};
+  ensureGrid_(base,chunks.length+1,8);
+  // Invalidar el slot INACTIVO y aplicar esa invalidación antes de tocar sus datos.
+  base.getRange(1,column,1,2).setValues([['',SNAPSHOT_KIND_]]);SpreadsheetApp.flush();
+  base.getRange(2,column,chunks.length,2).setValues(chunks);SpreadsheetApp.flush();
+  readSnapshotData_(base,column,meta); // Relectura y huella antes del compromiso.
+  base.getRange(1,column).setValue(JSON.stringify(meta));SpreadsheetApp.flush();
+  return {state:current,column:column,revision:current.revision,baseRevision:previous.baseRevision};
+}
+
+function archiveCoveredOperations_(ss,checkpoint) {
+  const log=ss.getSheetByName('Operaciones'),bounds=operationBounds_(log);
+  const count=bounds.count?Math.min(bounds.count,Math.max(0,checkpoint.revision-bounds.first+1)):0;
+  if(!count||checkpoint.column===null)return {copied:0,removed:0};
+  const rows=log.getRange(2,1,count,5).getValues();
+  rows.forEach((row,i)=>{
+    const action=operationFromRow_(row,bounds.first+i);
+    if(!checkpoint.state.requests.includes(action.requestId))throw new Error('Una operación a archivar no está incluida en el snapshot. No se quitó ninguna fila.');
+  });
+  const archive=ss.getSheetByName('Operaciones archivo')||ss.insertSheet('Operaciones archivo');
+  if(archive.getLastRow()===0)archive.getRange(1,1,1,5).setValues([OPERATION_HEADERS_]);
+  if(JSON.stringify(archive.getRange(1,1,1,5).getValues()[0])!==JSON.stringify(OPERATION_HEADERS_)){
+    throw new Error('La hoja Operaciones archivo contiene información ajena. No se sobrescribió nada.');
+  }
+  const archived=operationBounds_(archive);
+  if(archived.count&&archived.first!==checkpoint.baseRevision+1)throw new Error('El archivo no corresponde a la Base de esta instalación. No se quitó ninguna fila.');
+  const last=archived.count?archived.last:checkpoint.baseRevision;
+  if(bounds.first<checkpoint.baseRevision+1||bounds.first>last+1)throw new Error('El archivo tiene una secuencia inconsistente. No se quitó ninguna fila.');
+  const overlap=Math.min(count,Math.max(0,last-bounds.first+1));
+  const archiveRow=bounds.first-checkpoint.baseRevision+1;
+  if(overlap&&JSON.stringify(archive.getRange(archiveRow,1,overlap,5).getValues())!==JSON.stringify(rows.slice(0,overlap))){
+    throw new Error('La copia archivada no coincide con las operaciones activas. No se quitó ninguna fila.');
+  }
+  const pending=rows.slice(overlap);
+  if(pending.length){
+    ensureGrid_(archive,archived.count+pending.length+1,5);
+    archive.getRange(archived.count+2,2,pending.length,4).setNumberFormat('@');
+    archive.getRange(archived.count+2,1,pending.length,5).setValues(pending);
+  }
+  SpreadsheetApp.flush();
+  if(JSON.stringify(archive.getRange(archiveRow,1,count,5).getValues())!==JSON.stringify(rows)||
+     JSON.stringify(log.getRange(2,1,count,5).getValues())!==JSON.stringify(rows)){
+    throw new Error('No se pudo verificar el archivo. No se quitó ninguna fila del registro activo.');
+  }
+  // El snapshot confirmado y la copia verificada ya cubren TODAS estas filas.
+  log.deleteRows(2,count);SpreadsheetApp.flush();
+  return {copied:pending.length,removed:count};
+}
+
+function maintainDemoStorage_(archive) {
+  assertAuthorized_();
+  const ss=getBook_();
+  if(!connectionInfo_(ss).canConfigure)throw new Error('Solo la cuenta instaladora puede crear snapshots o archivar operaciones.');
+  const lock=LockService.getScriptLock();lock.waitLock(20000);
+  try {
+    const checkpoint=checkpointIfDue_(ss,readStateInfo_(ss),true);
+    const result=archive?archiveCoveredOperations_(ss,checkpoint):{copied:0,removed:0};
+    return {ok:true,revision:checkpoint.revision,copied:result.copied,removed:result.removed};
+  }finally{lock.releaseLock();}
+}
+
+// Mantenimiento explícito: primero hacé una copia de seguridad de la planilla.
+function createDemoSnapshot() { return maintainDemoStorage_(false); }
+function archiveDemoOperations() { return maintainDemoStorage_(true); }
 
 function safeCell_(value) {
   if(typeof value==='number')return value;
